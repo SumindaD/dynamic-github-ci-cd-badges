@@ -1,0 +1,178 @@
+service: dynamic-github-ci-cd-badges
+
+custom:
+  region: ${opt:region, 'us-west-2'}
+  currentStage: ${opt:stage, self:provider.stage}
+  lambdaRunTime: nodejs12.x
+  gituser: ${opt:gituser, 'git'}
+  gittoken: ${opt:gittoken, 'dummytoken'}
+  gitbranch: ${opt:gitbranch, 'master'}
+  gitrepo: ${opt:gitrepo, 'dummyrepo'}
+
+provider:
+  name: aws
+  runtime: ${self:custom.lambdaRunTime}
+  versionFunctions: false
+  region: ${self:custom.region}
+  timeout: 29
+
+  environment:
+    CODEPIPELINE_BRANCH: ${self:custom.gitbranch}
+
+plugins:
+  - serverless-pseudo-parameters
+
+package:
+  individually: true
+  exclude:
+    - ".serverless/**"
+    - "*.*"
+
+functions:
+  badge-rotuer-handler:
+    handler: badge-router.handler
+    package:
+      include:
+        - badge-router.js
+    events:
+      - http:
+          path: badge-router
+          method: get
+
+resources:
+  Resources:
+    # Create an S3 Bucket to store badges, build artifacts for codepipeline
+    S3Bucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.currentStage}-#{AWS::AccountId}-codepipeline-s3bucket
+
+    # Create Access Role for CodePipeLine
+    CodePipeLineExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+            Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: "sts:AssumeRole"
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/AdministratorAccess"
+
+    # Create Access Role for CodeBuild
+    CodeBuildExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AdministratorAccess
+
+    # Create the BuildProject with required Build information
+    BuildProject:
+      Type: "AWS::CodeBuild::Project"
+      Properties:
+        Name: ${self:custom.currentStage}-#{AWS::AccountId}-CodeBuildProject
+        Description: Demo of CodeBuild with CodeDeploy pipeline.
+        ServiceRole: !Ref CodeBuildExecutionRole
+        Source:
+          Type: CODEPIPELINE
+          BuildSpec: !Sub |
+            version: 0.2
+            phases:
+              install:
+                runtime-versions:
+                  nodejs: 12
+              pre_build:
+                commands:
+                  - echo Logging into install phase...
+                  - yum update -y
+                  - yum install sudo -y
+
+              build:
+                commands:
+                  - echo Build started
+                  - npm install
+                  
+                finally:
+                  - buildExitCode=$?
+                  - |
+                    if [ "$buildExitCode" -eq 0 ]; then
+                      result=passing
+                      color=green
+                    else
+                      result=failing
+                      color=red
+                    fi
+                  - curl -s "https://img.shields.io/badge/NextJSDeployment-InProgress-yellow.svg" > $gitbranch-NextJSDeployment.svg
+                  - aws s3 cp $gitbranch-NextJSDeployment.svg s3://$s3bucketname/badges/$gitbranch-NextJSDeployment.svg --acl public-read --cache-control no-cache
+
+              post_build:
+                commands:
+                  - echo Build completed on `date`
+        Environment:
+          Type: "LINUX_CONTAINER"
+          ComputeType: BUILD_GENERAL1_MEDIUM
+          Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+          EnvironmentVariables:
+            - Name: s3bucketname
+              Value: ${self:custom.currentStage}-#{AWS::AccountId}-codepipeline-s3bucket
+            - Name: gitbranch
+              Value: ${self:custom.gitbranch}
+            
+        Artifacts:
+          Type: CODEPIPELINE
+        
+    # Create CodePipeline with 2 stages (Source and Build)
+    CodePipeLine:
+      Type: AWS::CodePipeline::Pipeline
+      DependsOn: S3Bucket
+      Properties:
+        ArtifactStore:
+          Location: ${self:custom.currentStage}-#{AWS::AccountId}-codepipeline-s3bucket
+          Type: S3
+        Name: ${self:custom.currentStage}-#{AWS::AccountId}-CodePipeLine
+        RestartExecutionOnUpdate: False
+        RoleArn:
+          Fn::GetAtt: [CodePipeLineExecutionRole, Arn]
+
+        Stages:
+          # Download source code from Github Repo to source-output-artifacts path in S3 Bucket
+          - Name: Source
+            Actions:
+              - Name: Source
+                ActionTypeId:
+                  Category: Source
+                  Owner: ThirdParty
+                  Provider: GitHub
+                  Version: 1
+                Configuration:
+                  Repo: ${self:custom.gitrepo}
+                  Branch: ${self:custom.gitbranch}
+                  Owner: ${self:custom.gituser}
+                  OAuthToken: ${self:custom.gittoken}
+                RunOrder: 1
+                OutputArtifacts:
+                  - Name: source-output-artifacts
+
+          # Build the project using the BuildProject and Output build artifacts to build-output-artifacts path in S3 Bucket
+          - Name: Build
+            Actions:
+              - Name: Build
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Version: 1
+                  Provider: CodeBuild
+                OutputArtifacts:
+                  - Name: build-output-artifacts
+                InputArtifacts:
+                  - Name: source-output-artifacts
+                Configuration:
+                  ProjectName: !Ref BuildProject
+                RunOrder: 1

@@ -8,6 +8,7 @@ custom:
   gittoken: ${opt:gittoken, 'dummytoken'}
   gitbranch: ${opt:gitbranch, 'main'}
   gitrepo: ${opt:gitrepo, 'dummyrepo'}
+  badgeDiretory: badges
 
 provider:
   name: aws
@@ -18,6 +19,10 @@ provider:
 
   environment:
     CODEPIPELINE_BRANCH: ${self:custom.gitbranch}
+    S3_BUCKET_URL: !GetAtt
+                    - S3Bucket
+                    - WebsiteURL
+    BADGE_DIRECTORY: ${self:custom.badgeDiretory}
 
 plugins:
   - serverless-pseudo-parameters
@@ -109,8 +114,8 @@ resources:
                       result=failing
                       color=red
                     fi
-                  - curl -s "https://img.shields.io/badge/Build-$result-$color.svg" > $gitbranch-Build-$result-$color.svg
-                  - aws s3 cp $gitbranch-Build-$result-$color.svg s3://$s3bucketname/badges/$gitbranch-Build-$result-$color.svg --acl public-read --cache-control no-cache
+                  - curl -s "https://img.shields.io/badge/Build-$result-$color.svg" > $GITBRANCH-Build.svg
+                  - aws s3 cp $GITBRANCH-Build.svg s3://$S3BUCKET/$BADGE_DIRECTORY/$GITBRANCH-Build.svg --acl public-read --cache-control no-cache
 
               post_build:
                 commands:
@@ -120,10 +125,12 @@ resources:
           ComputeType: BUILD_GENERAL1_MEDIUM
           Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
           EnvironmentVariables:
-            - Name: s3bucketname
+            - Name: S3BUCKET
               Value: ${self:custom.currentStage}-#{AWS::AccountId}-codepipeline-s3bucket
-            - Name: gitbranch
+            - Name: GITBRANCH
               Value: ${self:custom.gitbranch}
+            - Name: BADGE_DIRECTORY
+              Value: ${self:custom.badgeDiretory}
             
         Artifacts:
           Type: CODEPIPELINE

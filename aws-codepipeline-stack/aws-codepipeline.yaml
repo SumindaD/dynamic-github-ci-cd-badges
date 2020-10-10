@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: The CloudFormation template for the CodePipeline
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+  GithubUserName:
+    Type: String
+    Default: <GithubUserName>
+  GithubRepo:
+    Type: String
+    Default: dynamic-github-ci-cd-badges
+  GithubBranch:
+    Type: String
+    Default: main
+  GithubOAuthToken:
+    Type: String
+    Default: <GithubOAuthToken>
+
+
+Resources:
+  # Create an S3 Bucket to store build artifacts
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ["-", [!Ref Stage, !Ref "AWS::AccountId", "codepipeline-s3bucket"]]
+
+  # Create Access Role for CodePipeLine
+  CodePipeLineExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AdministratorAccess"
+
+  # Create Access Role for CodeBuild
+  CodeBuildExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  # Create the BuildProject with required Build information
+  BuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Join ["-", [!Ref Stage, !Ref "AWS::AccountId", "CodeBuildProject"]]
+      Description: Demo of CodeBuild with CodeDeploy pipeline.
+      ServiceRole: !Ref CodeBuildExecutionRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+            version: 0.2
+            phases:
+              install:
+                runtime-versions:
+                  nodejs: 12
+              pre_build:
+                commands:
+                  - echo Logging into install phase...
+                  - yum update -y
+                  - yum install sudo -y
+
+              build:
+                commands:
+                  - echo Build started
+                  - npm install
+                  
+                finally:
+                  - buildExitCode=$?
+                  - |
+                    if [ "$buildExitCode" -eq 0 ]; then
+                      badge_status=passing
+                      badge_colour=green
+                    else
+                      badge_status=failing
+                      badge_colour=red
+                    fi
+                  - curl -s "https://img.shields.io/badge/$buildPhase-$badge_status-$badge_colour.svg" > ${GithubBranch}-$buildPhase.svg
+                  - aws s3 cp ${GithubBranch}-$buildPhase.svg s3://${S3Bucket}/badges/${GithubBranch}-$buildPhase.svg --acl public-read --cache-control no-cache
+
+            post_build:
+              commands:
+                - echo Build completed on `date`
+      Environment:
+        Type: "LINUX_CONTAINER"
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Artifacts:
+        Type: CODEPIPELINE
+      
+  # Create CodePipeline with 3 stages (Source, Build and Deploy)
+  CodePipeLine:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: S3Bucket
+    Properties:
+      ArtifactStore:
+        Location: !Join ["-", [!Ref Stage, !Ref "AWS::AccountId", "codepipeline-s3bucket"]]
+        Type: S3
+      Name: !Join ["-", [!Ref Stage, !Ref "AWS::AccountId", "CodePipeLine"]]
+      RestartExecutionOnUpdate: False
+      RoleArn:
+        Fn::GetAtt: [CodePipeLineExecutionRole, Arn]
+
+      Stages:
+        # Download source code from Github Repo to source-output-artifacts path in S3 Bucket
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              Configuration:
+                Repo: !Ref GithubRepo
+                Branch: !Ref GithubBranch
+                Owner: !Ref GithubUserName
+                OAuthToken: !Ref GithubOAuthToken
+              RunOrder: 1
+              OutputArtifacts:
+                - Name: source-output-artifacts
+
+        # Build the project using the BuildProject and Output build artifacts to build-output-artifacts path in S3 Bucket
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: build-output-artifacts
+              InputArtifacts:
+                - Name: source-output-artifacts
+              Configuration:
+                ProjectName: !Ref BuildProject
+              RunOrder: 1

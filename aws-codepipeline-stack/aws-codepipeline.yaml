@@ -69,31 +69,29 @@ Resources:
                   nodejs: 12
               pre_build:
                 commands:
+                  - buildExitCode=1
                   - echo Logging into install phase...
                   - yum update -y
                   - yum install sudo -y
-
               build:
                 commands:
                   - echo Build started
                   - (cd nodejs-app; npm install)
-                  
-                finally:
                   - buildExitCode=$?
+                finally:
                   - |
-                    if [ "$buildExitCode" -eq 0 ]; then
-                      badge_status=passing
-                      badge_colour=green
-                    else
+                    if [ "$buildExitCode" -ne 0 ]; then
                       badge_status=failing
                       badge_colour=red
+                    else
+                      badge_status=passing
+                      badge_colour=green
                     fi
                   - curl -s "https://img.shields.io/badge/Build-$badge_status-$badge_colour.svg" > ${GithubBranch}-build.svg
                   - aws s3 cp ${GithubBranch}-build.svg s3://${S3Bucket}/badges/${GithubBranch}-build.svg --acl public-read --cache-control no-cache
-
-            post_build:
-              commands:
-                - echo Build completed on `date`
+              post_build:
+                commands:
+                  - echo Build completed on `date`
       Environment:
         Type: "LINUX_CONTAINER"
         ComputeType: BUILD_GENERAL1_MEDIUM

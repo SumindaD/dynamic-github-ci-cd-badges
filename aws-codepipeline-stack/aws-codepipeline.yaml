@@ -76,7 +76,7 @@ Resources:
               build:
                 commands:
                   - echo Build started
-                  - npm install
+                  - (cd nodejs-app; npm install)
                   
                 finally:
                   - buildExitCode=$?
